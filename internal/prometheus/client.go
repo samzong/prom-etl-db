@@ -6,97 +6,18 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/jinzhu/now"
 	"github.com/prometheus/client_golang/api"
 	v1 "github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
 	"github.com/samzong/prom-etl-db/internal/models"
+	"github.com/samzong/prom-etl-db/internal/timeparser"
 )
 
 // Client represents a Prometheus client using official library
 type Client struct {
 	client       v1.API
-	timeResolver TimeResolver
+	timeResolver timeparser.TimeResolver
 	logger       *slog.Logger
-}
-
-// TimeResolver defines interface for time expression resolution
-type TimeResolver interface {
-	ResolveTime(expr string) (time.Time, error)
-	ResolveRangeTime(startExpr, endExpr string) (start, end time.Time, err error)
-}
-
-// RelativeTimeResolver implements TimeResolver using jinzhu/now
-type RelativeTimeResolver struct {
-	baseTime time.Time
-}
-
-// NewRelativeTimeResolver creates a new time resolver
-func NewRelativeTimeResolver(baseTime time.Time) *RelativeTimeResolver {
-	return &RelativeTimeResolver{baseTime: baseTime}
-}
-
-// ResolveTime resolves time expressions to actual time
-func (r *RelativeTimeResolver) ResolveTime(expr string) (time.Time, error) {
-	// Set the base time for jinzhu/now
-	nowTime := now.New(r.baseTime)
-
-	switch expr {
-	case "now":
-		return r.baseTime, nil
-	case "today":
-		return nowTime.BeginningOfDay(), nil
-	case "today_end":
-		return nowTime.EndOfDay(), nil
-	case "yesterday":
-		return nowTime.BeginningOfDay().AddDate(0, 0, -1), nil
-	case "yesterday_end":
-		return nowTime.EndOfDay().AddDate(0, 0, -1), nil
-	case "last_week":
-		return nowTime.BeginningOfWeek().AddDate(0, 0, -7), nil
-	case "last_week_end":
-		return nowTime.EndOfWeek().AddDate(0, 0, -7), nil
-	case "last_month":
-		return nowTime.BeginningOfMonth().AddDate(0, -1, 0), nil
-	case "last_month_end":
-		return nowTime.EndOfMonth().AddDate(0, -1, 0), nil
-	case "last_quarter":
-		return nowTime.BeginningOfQuarter().AddDate(0, -3, 0), nil
-	case "last_year":
-		return nowTime.BeginningOfYear().AddDate(-1, 0, 0), nil
-	default:
-		// Try to parse as duration offset (e.g., "-1h", "-24h", "+2h")
-		if len(expr) > 1 && (expr[0] == '-' || expr[0] == '+') {
-			duration, err := time.ParseDuration(expr[1:])
-			if err != nil {
-				return time.Time{}, fmt.Errorf("invalid time expression: %s", expr)
-			}
-			if expr[0] == '-' {
-				return r.baseTime.Add(-duration), nil
-			}
-			return r.baseTime.Add(duration), nil
-		}
-		return time.Time{}, fmt.Errorf("unsupported time expression: %s", expr)
-	}
-}
-
-// ResolveRangeTime resolves start and end time expressions
-func (r *RelativeTimeResolver) ResolveRangeTime(startExpr, endExpr string) (start, end time.Time, err error) {
-	start, err = r.ResolveTime(startExpr)
-	if err != nil {
-		return time.Time{}, time.Time{}, fmt.Errorf("failed to resolve start time '%s': %w", startExpr, err)
-	}
-
-	end, err = r.ResolveTime(endExpr)
-	if err != nil {
-		return time.Time{}, time.Time{}, fmt.Errorf("failed to resolve end time '%s': %w", endExpr, err)
-	}
-
-	if start.After(end) {
-		return time.Time{}, time.Time{}, fmt.Errorf("start time (%s) is after end time (%s)", start.Format(time.RFC3339), end.Format(time.RFC3339))
-	}
-
-	return start, end, nil
 }
 
 // NewClient creates a new Prometheus client using official library
@@ -128,7 +49,7 @@ func NewClientWithLogger(baseURL string, timeout time.Duration, baseLogger *slog
 
 	return &Client{
 		client:       v1.NewAPI(client),
-		timeResolver: NewRelativeTimeResolver(time.Now()),
+		timeResolver: timeparser.NewRelativeTimeParser(time.Now()),
 		logger:       clientLogger,
 	}, nil
 }

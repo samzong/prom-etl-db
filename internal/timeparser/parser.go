@@ -5,9 +5,17 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/jinzhu/now"
 )
 
-// RelativeTimeParser parses relative time expressions
+// TimeResolver defines interface for time expression resolution
+type TimeResolver interface {
+	ResolveTime(expr string) (time.Time, error)
+	ResolveRangeTime(startExpr, endExpr string) (start, end time.Time, err error)
+}
+
+// RelativeTimeParser parses relative time expressions and implements TimeResolver
 type RelativeTimeParser struct {
 	now time.Time
 }
@@ -15,6 +23,30 @@ type RelativeTimeParser struct {
 // NewRelativeTimeParser creates a new time parser with the given reference time
 func NewRelativeTimeParser(now time.Time) *RelativeTimeParser {
 	return &RelativeTimeParser{now: now}
+}
+
+// ResolveTime resolves time expressions to actual time (implements TimeResolver interface)
+func (p *RelativeTimeParser) ResolveTime(expr string) (time.Time, error) {
+	return p.Parse(expr)
+}
+
+// ResolveRangeTime resolves start and end time expressions (implements TimeResolver interface)
+func (p *RelativeTimeParser) ResolveRangeTime(startExpr, endExpr string) (start, end time.Time, err error) {
+	start, err = p.Parse(startExpr)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("failed to resolve start time '%s': %w", startExpr, err)
+	}
+
+	end, err = p.Parse(endExpr)
+	if err != nil {
+		return time.Time{}, time.Time{}, fmt.Errorf("failed to resolve end time '%s': %w", endExpr, err)
+	}
+
+	if start.After(end) {
+		return time.Time{}, time.Time{}, fmt.Errorf("start time (%s) is after end time (%s)", start.Format(time.RFC3339), end.Format(time.RFC3339))
+	}
+
+	return start, end, nil
 }
 
 // Parse parses a relative time expression and returns the absolute time
@@ -30,12 +62,37 @@ func (p *RelativeTimeParser) Parse(expr string) (time.Time, error) {
 		return p.now, nil
 	}
 
-	// Handle "yesterday" expressions
+	// Handle predefined keywords using jinzhu/now
+	nowTime := now.New(p.now)
+	switch expr {
+	case "today":
+		return nowTime.BeginningOfDay(), nil
+	case "today_end":
+		return nowTime.EndOfDay(), nil
+	case "yesterday":
+		return nowTime.BeginningOfDay().AddDate(0, 0, -1), nil
+	case "yesterday_end":
+		return nowTime.EndOfDay().AddDate(0, 0, -1), nil
+	case "last_week":
+		return nowTime.BeginningOfWeek().AddDate(0, 0, -7), nil
+	case "last_week_end":
+		return nowTime.EndOfWeek().AddDate(0, 0, -7), nil
+	case "last_month":
+		return nowTime.BeginningOfMonth().AddDate(0, -1, 0), nil
+	case "last_month_end":
+		return nowTime.EndOfMonth().AddDate(0, -1, 0), nil
+	case "last_quarter":
+		return nowTime.BeginningOfQuarter().AddDate(0, -3, 0), nil
+	case "last_year":
+		return nowTime.BeginningOfYear().AddDate(-1, 0, 0), nil
+	}
+
+	// Handle "yesterday" expressions with @time format
 	if strings.HasPrefix(expr, "yesterday") {
 		return p.parseYesterday(expr)
 	}
 
-	// Handle "today" expressions
+	// Handle "today" expressions with @time format
 	if strings.HasPrefix(expr, "today") {
 		return p.parseToday(expr)
 	}
@@ -130,7 +187,21 @@ func (p *RelativeTimeParser) parseTimeWithDate(date time.Time, timeStr string) (
 
 // parseRelative handles relative time expressions
 func (p *RelativeTimeParser) parseRelative(expr string) (time.Time, error) {
-	// Parse expressions like "-1d", "+2h", "-30m", etc.
+	// First, try to parse as standard Go duration format (e.g., "-1h", "+2h30m", "-30s")
+	// This supports formats like: -1h, +2h, -30m, +15s, -1h30m, etc.
+	if len(expr) > 1 && (expr[0] == '-' || expr[0] == '+') {
+		durationStr := expr[1:]
+		duration, err := time.ParseDuration(durationStr)
+		if err == nil {
+			if expr[0] == '-' {
+				return p.now.Add(-duration), nil
+			}
+			return p.now.Add(duration), nil
+		}
+	}
+
+	// Fallback to custom format: "-1d", "+2h", "-30m", etc.
+	// This supports day unit which is not in standard Go duration
 	re := regexp.MustCompile(`^([+-])(\d+)([dhms])$`)
 	matches := re.FindStringSubmatch(expr)
 
@@ -166,9 +237,8 @@ func (p *RelativeTimeParser) parseRelative(expr string) (time.Time, error) {
 	// Apply the duration
 	if sign == "-" {
 		return p.now.Add(-duration), nil
-	} else {
-		return p.now.Add(duration), nil
 	}
+	return p.now.Add(duration), nil
 }
 
 // parseInt is a helper function to parse integers
