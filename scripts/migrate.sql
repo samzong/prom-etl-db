@@ -15,7 +15,7 @@ SET
 
 -- Metrics data table
 -- Stores all Prometheus query results
-CREATE TABLE
+CREATE TABLE IF NOT EXISTS
   `metrics_data` (
     `id` bigint NOT NULL AUTO_INCREMENT,
     `query_id` varchar(100) NOT NULL,
@@ -35,7 +35,7 @@ CREATE TABLE
 
 -- Query execution records
 -- Tracks execution history and performance
-CREATE TABLE
+CREATE TABLE IF NOT EXISTS
   `query_executions` (
     `id` bigint NOT NULL AUTO_INCREMENT,
     `query_id` varchar(100) NOT NULL,
@@ -56,7 +56,7 @@ CREATE TABLE
 
 -- Query configurations
 -- Stores query configuration information
-CREATE TABLE
+CREATE TABLE IF NOT EXISTS
   `query_configs` (
     `id` bigint NOT NULL AUTO_INCREMENT,
     `query_id` varchar(100) NOT NULL,
@@ -83,7 +83,7 @@ CREATE TABLE
   ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
 
 -- Insert initial query configuration
-INSERT INTO
+INSERT IGNORE INTO
   query_configs (
     query_id,
     name,

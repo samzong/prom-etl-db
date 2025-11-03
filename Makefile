@@ -35,6 +35,38 @@ setup: ## Setup development environment
 	@if [ ! -f .env ]; then cp env.example .env; echo "$(GREEN)Created .env file$(NC)"; fi
 	@mkdir -p $(BUILD_DIR) logs
 
+.PHONY: init-db
+init-db: ## Initialize MySQL database and tables using Docker
+	@if [ ! -f docker-compose.yaml ]; then echo "$(RED)Error: docker-compose.yaml not found$(NC)"; exit 1; fi
+	@if ! command -v docker-compose >/dev/null 2>&1 && ! command -v docker >/dev/null 2>&1; then echo "$(RED)Error: docker-compose or docker not found$(NC)"; exit 1; fi
+	@echo "$(BLUE)Starting MySQL service...$(NC)"
+	@docker-compose up -d mysql 2>/dev/null || docker compose up -d mysql
+	@echo "$(BLUE)Waiting for MySQL to be ready...$(NC)"
+	@timeout=60; \
+	while [ $$timeout -gt 0 ]; do \
+		if docker-compose exec -T mysql mysqladmin ping -h localhost -u root -ppassword >/dev/null 2>&1 || \
+		   docker compose exec -T mysql mysqladmin ping -h localhost -u root -ppassword >/dev/null 2>&1; then \
+			break; \
+		fi; \
+		sleep 1; \
+		timeout=$$((timeout - 1)); \
+	done; \
+	if [ $$timeout -le 0 ]; then \
+		echo "$(RED)Error: MySQL did not become ready in time$(NC)"; \
+		exit 1; \
+	fi
+	@echo "$(BLUE)Checking if database is already initialized...$(NC)"
+	@table_exists=$$(docker-compose exec -T mysql mysql -u root -ppassword -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='prometheus_data' AND table_name='metrics_data';" 2>/dev/null | tail -n 1 || \
+	 docker compose exec -T mysql mysql -u root -ppassword -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema='prometheus_data' AND table_name='metrics_data';" 2>/dev/null | tail -n 1); \
+	if [ "$$table_exists" = "1" ]; then \
+		echo "$(GREEN)Database already initialized, skipping migration$(NC)"; \
+	else \
+		echo "$(BLUE)Initializing database...$(NC)"; \
+		docker-compose exec -T mysql mysql -u root -ppassword < scripts/migrate.sql 2>/dev/null || \
+		 docker compose exec -T mysql mysql -u root -ppassword < scripts/migrate.sql; \
+		echo "$(GREEN)Database initialized successfully$(NC)"; \
+	fi
+
 .PHONY: fmt
 fmt: ## Format Go code
 	@echo "$(BLUE)Formatting Go code...$(NC)"

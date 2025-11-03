@@ -22,19 +22,11 @@ A Go-based ETL tool that collects Prometheus metrics and stores them in MySQL da
 
 ### Configuration
 
-Copy environment template and setup development environment:
-
 ```bash
 make setup
 ```
 
-Or manually copy the template:
-
-```bash
-cp env.example .env
-```
-
-Configure environment variables:
+Configure environment variables in `.env`:
 
 ```bash
 # Prometheus Configuration
@@ -57,193 +49,107 @@ WORKER_POOL_SIZE=10
 
 ### Database Setup
 
-Initialize database schema:
-
 ```bash
-# Using make command
-make db-migrate
-
-# Or manually
-mysql -u root -p prometheus_data < scripts/migrate.sql
+make init-db
 ```
 
 ### Running
 
-#### Docker Compose
-
 ```bash
-# Start all services with make
+# Docker Compose
 make docker-up
 
-# Or manually
-docker-compose up -d
-```
-
-#### Local Development
-
-```bash
-# Build and run with make
-make build
-make run
-# Or using debug mode
+# Local Development
+make build && make run
+# or
 make debug
-
-# Or manually
-go mod download
-go run cmd/server/main.go
 ```
 
 ## Configuration
 
 ### Environment Variables
 
-| Variable             | Description           | Default           |
-| -------------------- | --------------------- | ----------------- |
+| Variable             | Description           | Default                 |
+| -------------------- | --------------------- | ----------------------- |
 | `PROMETHEUS_URL`     | Prometheus server URL | `http://localhost:9090` |
-| `PROMETHEUS_TIMEOUT` | Query timeout         | `30s`             |
-| `MYSQL_HOST`         | MySQL host            | `localhost`       |
-| `MYSQL_PORT`         | MySQL port            | `3306`            |
-| `MYSQL_DATABASE`     | Database name         | `prometheus_data` |
-| `MYSQL_USERNAME`     | Database username     | `root`            |
-| `MYSQL_PASSWORD`     | Database password     | `password`        |
-| `MYSQL_CHARSET`      | MySQL charset         | `utf8mb4`         |
-| `LOG_LEVEL`          | Log level             | `info`            |
-| `HTTP_PORT`          | HTTP server port      | `8080`            |
-| `WORKER_POOL_SIZE`   | Worker pool size      | `10`              |
+| `PROMETHEUS_TIMEOUT` | Query timeout         | `30s`                   |
+| `MYSQL_HOST`         | MySQL host            | `localhost`             |
+| `MYSQL_PORT`         | MySQL port            | `3306`                  |
+| `MYSQL_DATABASE`     | Database name         | `prometheus_data`       |
+| `MYSQL_USERNAME`     | Database username     | `root`                  |
+| `MYSQL_PASSWORD`     | Database password     | `password`              |
+| `MYSQL_CHARSET`      | MySQL charset         | `utf8mb4`               |
+| `LOG_LEVEL`          | Log level             | `info`                  |
+| `HTTP_PORT`          | HTTP server port      | `8080`                  |
+| `WORKER_POOL_SIZE`   | Worker pool size      | `10`                    |
 
 ### Query Configuration
 
-Queries are stored in the `query_configs` table with the following structure:
+Queries are stored in `query_configs` table:
 
-- **query_id**: Unique identifier
-- **name**: Human-readable name
-- **query**: PromQL expression
-- **schedule**: Cron expression (with seconds)
-- **time_range_type**: `instant` or `range`
-- **time_range_start/end**: Relative time expressions
-- **enabled**: Boolean flag
-- **retry_count**: Number of retries on failure
+- `query_id`: Unique identifier
+- `query`: PromQL expression
+- `schedule`: Cron expression (with seconds)
+- `time_range_type`: `instant` or `range`
+- `enabled`: Boolean flag
 
 ## Database Schema
 
-### metrics_data
+**metrics_data**: Stores metric values with JSON labels
 
-Stores all metric values with JSON labels:
+- `query_id`, `metric_name`, `labels`, `value`, `timestamp`, `result_type`
 
-```sql
-CREATE TABLE metrics_data (
-  id bigint AUTO_INCREMENT PRIMARY KEY,
-  query_id varchar(100) NOT NULL,
-  metric_name varchar(255) NOT NULL,
-  labels json NOT NULL,
-  value double NOT NULL,
-  timestamp timestamp(3) NOT NULL,
-  result_type enum('instant','range','scalar') NOT NULL,
-  collected_at timestamp DEFAULT CURRENT_TIMESTAMP,
-  KEY idx_query_id_timestamp (query_id, timestamp)
-);
-```
+**query_executions**: Execution history and performance
 
-### query_executions
+- `query_id`, `status`, `start_time`, `end_time`, `duration_ms`, `records_count`
 
-Tracks execution history and performance:
+**query_configs**: Query configurations
 
-```sql
-CREATE TABLE query_executions (
-  id bigint AUTO_INCREMENT PRIMARY KEY,
-  query_id varchar(100) NOT NULL,
-  status enum('running','success','failed','timeout') NOT NULL,
-  start_time timestamp(3) NOT NULL,
-  end_time timestamp(3) NULL,
-  duration_ms int NULL,
-  records_count int DEFAULT 0,
-  error_message text NULL
-);
-```
+- `query_id`, `query`, `schedule`, `time_range_type`, `enabled`
 
 ## Project Structure
 
 ```
 prom-etl-db/
-├── cmd/server/main.go              # Application entry point
+├── cmd/server/main.go
 ├── internal/
-│   ├── config/                     # Configuration management
-│   ├── database/                   # MySQL operations
-│   ├── executor/                   # Query execution logic
-│   ├── logger/                     # Structured logging
-│   ├── models/                     # Data models
-│   ├── prometheus/                 # Prometheus client
-│   └── timeparser/                 # Relative time parsing
-├── scripts/migrate.sql             # Database schema
-├── Makefile                        # Build and development tasks
-├── env.example                     # Environment variables template
-└── docker-compose.yaml             # Container orchestration
+│   ├── config/      # Configuration
+│   ├── database/     # MySQL operations
+│   ├── executor/     # Query execution
+│   ├── logger/       # Logging
+│   ├── models/       # Data models
+│   ├── prometheus/   # Prometheus client
+│   └── timeparser/   # Time parsing
+├── scripts/migrate.sql
+└── Makefile
 ```
 
 ## Time Range Support
 
-The tool supports flexible time range configurations:
+**Instant**: `time_range_type: instant`, `time_range_time: "now-1h"`
 
-### Instant Queries
+**Range**: `time_range_type: range`, `time_range_start: "now-1d/d"`, `time_range_end: "now/d"`, `time_range_step: "1h"`
 
-```yaml
-time_range_type: instant
-time_range_time: "now-1h" # 1 hour ago
-```
-
-### Range Queries
-
-```yaml
-time_range_type: range
-time_range_start: "now-1d/d" # Yesterday 00:00:00
-time_range_end: "now/d" # Today 00:00:00
-time_range_step: "1h" # 1 hour intervals
-```
-
-## Available Make Commands
+## Make Commands
 
 ```bash
 # Development
-make setup          # Setup development environment
-make fmt            # Format Go code
-make clean          # Clean build files
+make setup          # Setup environment
 make build          # Build binary
 make debug          # Run in debug mode
-make run            # Run application (requires build)
+make run            # Run application
 
 # Docker
-make docker-build   # Build Docker image
-make docker-push    # Push Docker image
-make docker-up      # Start Docker services
-make docker-down    # Stop Docker services
+make docker-build   # Build image
+make docker-up      # Start services
+make docker-down    # Stop services
 
 # Database
-make db-migrate     # Run database migrations
-make db-reset       # Reset database (WARNING: destructive)
+make init-db        # Initialize database
+make db-migrate     # Run migrations
 
 # Help
-make help           # Show all available commands
-```
-
-## Building
-
-```bash
-# Setup development environment
-make setup
-
-# Run tests
-make test
-
-# Build binary
-make build
-
-# Build Docker image
-make docker-build
-
-# Or manually
-go test ./...
-go build -o build/prom-etl-db cmd/server/main.go
-docker build -t prom-etl-db .
+make help           # Show all commands
 ```
 
 ## Dependencies
