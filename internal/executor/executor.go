@@ -11,21 +11,24 @@ import (
 	"github.com/samzong/prom-etl-db/internal/logger"
 	"github.com/samzong/prom-etl-db/internal/models"
 	"github.com/samzong/prom-etl-db/internal/prometheus"
+	"github.com/samzong/prom-etl-db/internal/timeparser"
 )
 
 // Executor handles query execution and data storage
 type Executor struct {
-	promClient *prometheus.Client
-	db         *database.DB
-	logger     *slog.Logger
+	promClient  *prometheus.Client
+	db          *database.DB
+	logger      *slog.Logger
+	timeResolver timeparser.TimeResolver
 }
 
 // NewExecutor creates a new query executor
 func NewExecutor(promClient *prometheus.Client, db *database.DB, baseLogger *slog.Logger) *Executor {
 	return &Executor{
-		promClient: promClient,
-		db:         db,
-		logger:     logger.WithComponent(baseLogger, "executor"),
+		promClient:   promClient,
+		db:           db,
+		logger:       logger.WithComponent(baseLogger, "executor"),
+		timeResolver: timeparser.NewRelativeTimeParser(time.Now()),
 	}
 }
 
@@ -266,6 +269,9 @@ func (e *Executor) convertSampleToRecord(sample *models.VectorSample, queryID st
 		resultType = "range"
 	}
 
+	// Calculate collected_at based on query configuration
+	collectedAt := e.calculateCollectedAt(time.Unix(int64(timestamp), 0), timeRange)
+
 	return &models.MetricRecord{
 		QueryID:     queryID,
 		MetricName:  metricName,
@@ -273,7 +279,7 @@ func (e *Executor) convertSampleToRecord(sample *models.VectorSample, queryID st
 		Value:       value,
 		Timestamp:   time.Unix(int64(timestamp), 0),
 		ResultType:  resultType,
-		CollectedAt: time.Unix(int64(timestamp), 0), // Use query timestamp as collected_at for proper date grouping
+		CollectedAt: collectedAt,
 	}, nil
 }
 
@@ -335,15 +341,19 @@ func (e *Executor) convertMatrixSampleToRecords(matrixSample *models.MatrixSampl
 			continue
 		}
 
+		// Calculate collected_at based on query configuration
+		dataPointTime := time.Unix(int64(timestamp), 0)
+		collectedAt := e.calculateCollectedAt(dataPointTime, timeRange)
+
 		// Create metric record
 		record := &models.MetricRecord{
 			QueryID:     queryID,
 			MetricName:  metricName,
 			Labels:      labels,
 			Value:       value,
-			Timestamp:   time.Unix(int64(timestamp), 0),
+			Timestamp:   dataPointTime,
 			ResultType:  "range",
-			CollectedAt: time.Unix(int64(timestamp), 0), // Use query timestamp as collected_at for proper date grouping
+			CollectedAt: collectedAt,
 		}
 
 		records = append(records, record)
@@ -389,6 +399,65 @@ func (e *Executor) ExecuteQueryWithRetry(ctx context.Context, queryConfig *model
 	}
 
 	return fmt.Errorf("query failed after %d attempts: %w", queryConfig.RetryCount+1, lastErr)
+}
+
+// calculateCollectedAt calculates the collected_at timestamp based on query configuration
+// For range queries, if the query time range is within the same day, use that day's start time
+// For instant queries with "yesterday" or "yesterday_end", use yesterday's start time
+// Otherwise, use the data point's timestamp
+func (e *Executor) calculateCollectedAt(dataPointTime time.Time, timeRange *models.TimeRangeConfig) time.Time {
+	if timeRange == nil {
+		// No time range config, use data point timestamp
+		return dataPointTime
+	}
+
+	// Update time resolver to use current time
+	if relativeParser, ok := e.timeResolver.(*timeparser.RelativeTimeParser); ok {
+		relativeParser.UpdateNow(time.Now())
+	}
+
+	if timeRange.Type == "range" {
+		// For range queries, check if start and end are on the same day
+		if timeRange.Start != "" && timeRange.End != "" {
+			start, end, err := e.timeResolver.ResolveRangeTime(timeRange.Start, timeRange.End)
+			if err == nil {
+				// Check if start and end are on the same day
+				startDate := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, start.Location())
+				endDate := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, end.Location())
+				
+				if startDate.Equal(endDate) {
+					// Same day: use the start of that day for all data points
+					return startDate
+				} else {
+					// Different days: use the start of the day for each data point
+					dataDate := time.Date(dataPointTime.Year(), dataPointTime.Month(), dataPointTime.Day(), 0, 0, 0, 0, dataPointTime.Location())
+					return dataDate
+				}
+			}
+		}
+		// If we can't resolve the time range, fall back to using data point's day start
+		dataDate := time.Date(dataPointTime.Year(), dataPointTime.Month(), dataPointTime.Day(), 0, 0, 0, 0, dataPointTime.Location())
+		return dataDate
+	}
+
+	if timeRange.Type == "instant" {
+		// For instant queries, check if querying yesterday's data
+		if timeRange.Time == "yesterday" || timeRange.Time == "yesterday_end" {
+			queryTime, err := e.timeResolver.ResolveTime(timeRange.Time)
+			if err == nil {
+				// Use yesterday's start time
+				yesterdayStart := time.Date(queryTime.Year(), queryTime.Month(), queryTime.Day(), 0, 0, 0, 0, queryTime.Location())
+				return yesterdayStart
+			}
+		}
+		// For other instant queries, use the data point's day start
+		dataDate := time.Date(dataPointTime.Year(), dataPointTime.Month(), dataPointTime.Day(), 0, 0, 0, 0, dataPointTime.Location())
+		return dataDate
+	}
+
+	// Default: use data point's day start
+	dataDate := time.Date(dataPointTime.Year(), dataPointTime.Month(), dataPointTime.Day(), 0, 0, 0, 0, dataPointTime.Location())
+	return dataDate
 }
 
 // TestConnections tests both Prometheus and MySQL connections
