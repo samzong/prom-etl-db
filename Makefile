@@ -85,6 +85,16 @@ build: ## Build binary file
 	@go build $(LDFLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) $(MAIN_PATH)
 	@echo "$(GREEN)Build completed: $(BUILD_DIR)/$(BINARY_NAME)$(NC)"
 
+.PHONY: build-repair
+build-repair: ## Build repair tool
+	@mkdir -p $(BUILD_DIR)
+	@go build $(LDFLAGS) -o $(BUILD_DIR)/repair ./cmd/repair
+	@echo "$(GREEN)Build completed: $(BUILD_DIR)/repair$(NC)"
+
+.PHONY: build-all
+build-all: build build-repair ## Build all tools
+	@echo "$(GREEN)All tools built successfully$(NC)"
+
 .PHONY: debug
 debug: ## Run application in debug mode
 	@if [ ! -f .env ]; then echo "$(RED)Error: .env file does not exist, please run make setup first$(NC)"; exit 1; fi
