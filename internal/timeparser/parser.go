@@ -25,6 +25,11 @@ func NewRelativeTimeParser(now time.Time) *RelativeTimeParser {
 	return &RelativeTimeParser{now: now}
 }
 
+// UpdateNow updates the reference time to the current time
+func (p *RelativeTimeParser) UpdateNow(now time.Time) {
+	p.now = now
+}
+
 // ResolveTime resolves time expressions to actual time (implements TimeResolver interface)
 func (p *RelativeTimeParser) ResolveTime(expr string) (time.Time, error) {
 	return p.Parse(expr)

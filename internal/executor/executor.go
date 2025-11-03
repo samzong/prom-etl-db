@@ -273,7 +273,7 @@ func (e *Executor) convertSampleToRecord(sample *models.VectorSample, queryID st
 		Value:       value,
 		Timestamp:   time.Unix(int64(timestamp), 0),
 		ResultType:  resultType,
-		CollectedAt: time.Now(),
+		CollectedAt: time.Unix(int64(timestamp), 0), // Use query timestamp as collected_at for proper date grouping
 	}, nil
 }
 
@@ -343,7 +343,7 @@ func (e *Executor) convertMatrixSampleToRecords(matrixSample *models.MatrixSampl
 			Value:       value,
 			Timestamp:   time.Unix(int64(timestamp), 0),
 			ResultType:  "range",
-			CollectedAt: time.Now(),
+			CollectedAt: time.Unix(int64(timestamp), 0), // Use query timestamp as collected_at for proper date grouping
 		}
 
 		records = append(records, record)

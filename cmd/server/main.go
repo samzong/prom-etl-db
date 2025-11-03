@@ -44,9 +44,7 @@ func main() {
 		"go_version", goVersion)
 
 	// Create database connection
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%d)/%s?charset=%s&parseTime=True&loc=Local",
-		cfg.MySQL.Username, cfg.MySQL.Password, cfg.MySQL.Host, cfg.MySQL.Port,
-		cfg.MySQL.Database, cfg.MySQL.Charset)
+	dsn := config.GetMySQLDSN(&cfg.MySQL)
 
 	db, err := database.NewDB(dsn)
 	if err != nil {
@@ -171,17 +169,23 @@ func runService(ctx context.Context, exec *executor.Executor, cfg *models.Config
 
 		// Create a timeout context for each query
 		queryCtx, queryCancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer queryCancel()
 
-		if err := exec.ExecuteQuery(queryCtx, &query); err != nil {
+		// Use retry mechanism if configured
+		var err error
+		if query.RetryCount > 0 {
+			err = exec.ExecuteQueryWithRetry(queryCtx, &query)
+		} else {
+			err = exec.ExecuteQuery(queryCtx, &query)
+		}
+
+		if err != nil {
 			log.Error("Query execution failed",
 				"query_id", query.ID,
 				"error", err)
-			log.Warn("Initial query execution failed", "error", err)
 		} else {
 			log.Info("Query executed successfully", "query_id", query.ID)
 		}
-
-		queryCancel()
 	}
 
 	// Setup signal handling for graceful shutdown

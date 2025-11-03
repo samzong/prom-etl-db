@@ -300,8 +300,17 @@ func (db *DB) GetDatabaseStats() (map[string]interface{}, error) {
 	stats["idle"] = dbStats.Idle
 
 	// Get table counts
+	// Use whitelist to prevent SQL injection
+	allowedTables := map[string]bool{
+		"metrics_data":     true,
+		"query_executions": true,
+	}
 	tables := []string{"metrics_data", "query_executions"}
 	for _, table := range tables {
+		// Validate table name against whitelist
+		if !allowedTables[table] {
+			return nil, fmt.Errorf("table name not in whitelist: %s", table)
+		}
 		query := fmt.Sprintf("SELECT COUNT(*) FROM %s", table)
 		var count int64
 		err := db.conn.QueryRow(query).Scan(&count)

@@ -97,6 +97,10 @@ func (c *Client) QueryInstantWithConfig(ctx context.Context, query string, timeC
 	queryTime := time.Now()
 
 	if timeConfig != nil && timeConfig.Time != "" {
+		// Update the time resolver to use current time for relative expressions
+		if relativeParser, ok := c.timeResolver.(*timeparser.RelativeTimeParser); ok {
+			relativeParser.UpdateNow(time.Now())
+		}
 		var err error
 		queryTime, err = c.timeResolver.ResolveTime(timeConfig.Time)
 		if err != nil {
@@ -160,6 +164,11 @@ func (c *Client) QueryRange(ctx context.Context, query string, start, end time.T
 func (c *Client) QueryRangeWithConfig(ctx context.Context, query string, timeConfig *models.TimeRangeConfig) (*models.PrometheusResponse, error) {
 	if timeConfig == nil {
 		return nil, fmt.Errorf("time configuration is required for range query")
+	}
+
+	// Update the time resolver to use current time for relative expressions
+	if relativeParser, ok := c.timeResolver.(*timeparser.RelativeTimeParser); ok {
+		relativeParser.UpdateNow(time.Now())
 	}
 
 	start, end, err := c.timeResolver.ResolveRangeTime(timeConfig.Start, timeConfig.End)
