@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"context"
+	"database/sql"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -15,24 +17,45 @@ import (
 	"github.com/samzong/prom-etl-db/internal/logger"
 	"github.com/samzong/prom-etl-db/internal/models"
 	"github.com/samzong/prom-etl-db/internal/prometheus"
+	"github.com/samzong/prom-etl-db/internal/timeparser"
 )
 
 func main() {
 	// Load .env file if it exists
 	loadEnvFile(".env")
 
+	// Parse command line flags
+	var queryID string
+	var forceRecompute bool
+	var dryRun bool
+	var skipIfNoData bool
+
+	flag.StringVar(&queryID, "query-id", "", "Query ID from database (required)")
+	flag.BoolVar(&forceRecompute, "force-recompute", false, "Force recompute even if data exists (will delete old data)")
+	flag.BoolVar(&dryRun, "dry-run", false, "Preview mode: show what would be done without actually doing it")
+	flag.BoolVar(&skipIfNoData, "skip-if-no-data", true, "Skip deletion if Prometheus has no data (keep old data)")
+	flag.Parse()
+
+	// Validate required parameter
+	if queryID == "" {
+		log.Fatalf("Error: --query-id is required\n\nUsage:\n  repair --query-id <query_id> <days>\n  repair --query-id <query_id> <start_date> <end_date>\n\nExamples:\n  repair --query-id gpu_utilization_daily 30\n  repair --query-id gpu_utilization_daily 2024-01-01 2025-01-31")
+	}
+
+	// Parse position arguments (days or date range)
 	var startDate, endDate time.Time
 	var err error
 
 	now := time.Now()
-	// Default: query last 90 days from yesterday
 	yesterday := now.AddDate(0, 0, -1)
-	defaultDays := 90
 
-	if len(os.Args) >= 3 {
+	args := flag.Args()
+	if len(args) == 0 {
+		// No days or date range specified, prompt error
+		log.Fatalf("Error: Please specify days or date range\n\nUsage:\n  repair --query-id <query_id> <days>\n  repair --query-id <query_id> <start_date> <end_date>\n\nExamples:\n  repair --query-id gpu_utilization_daily 30\n  repair --query-id gpu_utilization_daily 2024-01-01 2025-01-31")
+	} else if len(args) >= 2 {
 		// Manual date range specified
-		startDateStr := os.Args[1]
-		endDateStr := os.Args[2]
+		startDateStr := args[0]
+		endDateStr := args[1]
 
 		startDate, err = time.Parse("2006-01-02", startDateStr)
 		if err != nil {
@@ -47,31 +70,38 @@ func main() {
 		if startDate.After(endDate) {
 			log.Fatalf("Start date must be before end date")
 		}
-	} else if len(os.Args) == 2 {
+	} else if len(args) == 1 {
 		// Days specified
-		days, err := strconv.Atoi(os.Args[1])
+		days, err := strconv.Atoi(args[0])
 		if err != nil {
-			log.Fatalf("Failed to parse days: %v. Usage: repair [days] or repair <start_date> <end_date>", err)
+			log.Fatalf("Failed to parse days: %v. Usage: repair --query-id <id> <days> or repair --query-id <id> <start_date> <end_date>", err)
+		}
+		if days <= 0 {
+			log.Fatalf("Days must be greater than 0")
 		}
 		endDate = yesterday
 		startDate = yesterday.AddDate(0, 0, -days+1)
-		defaultDays = days
-	} else {
-		// Default: last 90 days
-		endDate = yesterday
-		startDate = yesterday.AddDate(0, 0, -defaultDays+1)
 	}
 
+	// Print configuration
 	fmt.Printf("Data Repair Tool\n")
 	fmt.Printf("================\n")
-	fmt.Printf("Start Date: %s (last %d days from yesterday)\n", startDate.Format("2006-01-02"), defaultDays)
-	fmt.Printf("End Date: %s (yesterday)\n", endDate.Format("2006-01-02"))
-	fmt.Printf("Query ID: gpu_utilization_daily\n")
-	fmt.Printf("\nUsage:\n")
-	fmt.Printf("  repair                    # Query last 90 days (default)\n")
-	fmt.Printf("  repair 30                 # Query last 30 days\n")
-	fmt.Printf("  repair 2025-07-24 2025-11-03  # Query specific date range\n")
+	fmt.Printf("Query ID: %s\n", queryID)
+	fmt.Printf("Start Date: %s\n", startDate.Format("2006-01-02"))
+	fmt.Printf("End Date: %s\n", endDate.Format("2006-01-02"))
+	if len(args) == 1 {
+		days := int(endDate.Sub(startDate).Hours()/24) + 1
+		fmt.Printf("Days: %d\n", days)
+	}
+	fmt.Printf("Force Recompute: %v\n", forceRecompute)
+	fmt.Printf("Dry Run: %v\n", dryRun)
+	fmt.Printf("Skip If No Data: %v\n", skipIfNoData)
 	fmt.Println()
+
+	if dryRun {
+		fmt.Println("⚠️  DRY RUN MODE: No changes will be made")
+		fmt.Println()
+	}
 
 	// Load configuration
 	cfg, err := config.LoadConfig()
@@ -83,21 +113,18 @@ func main() {
 	if cfg.Prometheus.URL == "http://localhost:9090" {
 		fmt.Println("\n⚠️  Warning: Prometheus URL is using default value (localhost:9090)")
 		fmt.Println("Please set PROMETHEUS_URL environment variable or create .env file")
-		fmt.Println("\nExample:")
-		fmt.Println("  export PROMETHEUS_URL=http://10.20.100.200:30588/select/0/prometheus")
-		fmt.Println("  ./build/repair")
-		fmt.Println("\nOr create .env file based on env.example and run:")
-		fmt.Println("  source .env  # or export $(cat .env | grep -v '^#' | xargs)")
-		fmt.Println("  ./build/repair")
-		fmt.Println()
 		os.Exit(1)
 	}
 
 	// Create logger
 	logger := logger.NewLogger(cfg.App.LogLevel)
 	logger.Info("Starting data repair",
+		"query_id", queryID,
 		"start_date", startDate.Format("2006-01-02"),
-		"end_date", endDate.Format("2006-01-02"))
+		"end_date", endDate.Format("2006-01-02"),
+		"force_recompute", forceRecompute,
+		"dry_run", dryRun,
+		"skip_if_no_data", skipIfNoData)
 
 	// Create database connection
 	dsn := config.GetMySQLDSN(&cfg.MySQL)
@@ -106,6 +133,16 @@ func main() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer db.Close()
+
+	// Load query configuration from database
+	queryConfig, err := loadQueryConfigFromDB(db, queryID)
+	if err != nil {
+		log.Fatalf("Failed to load query config: %v", err)
+	}
+
+	fmt.Printf("Query: %s\n", queryConfig.Query)
+	fmt.Printf("Name: %s\n", queryConfig.Name)
+	fmt.Println()
 
 	// Parse timeout duration
 	timeoutDuration, err := time.ParseDuration(cfg.Prometheus.Timeout)
@@ -120,18 +157,18 @@ func main() {
 	}
 	defer promClient.Close()
 
-	// Create query configuration
-	queryConfig := &models.QueryConfig{
-		ID:          "gpu_utilization_daily",
-		Name:        "GPU每日利用率统计",
-		Query:       "sum(sum_over_time(max without(exported_namespace, exported_pod, modelName, prometheus, cluster, insight, mode) (kpanda_gpu_pod_utilization != bool 999999)[24h:1m])) by (cluster_name, node, UUID) * 60 / 3600",
-		TimeRange:   nil, // Will be set per day
-	}
+	// Create time resolver for calculating collected_at
+	timeResolver := timeparser.NewRelativeTimeParser(time.Now())
 
 	// Process each day
 	currentDate := startDate
 	totalProcessed := 0
 	totalFailed := 0
+	totalSkipped := 0
+	totalDeleted := 0
+	totalNoData := 0
+	datesWithData := []string{}
+	datesWithoutData := []string{}
 
 	for !currentDate.After(endDate) {
 		// Calculate yesterday_end for this date
@@ -143,14 +180,8 @@ func main() {
 			currentDate.Location(),
 		)
 
-		// Set time range for this query
-		queryConfig.TimeRange = &models.TimeRangeConfig{
-			Type: "instant",
-			Time: "", // Will be set to specific time
-		}
-
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		
+
 		logger.Info("Processing date",
 			"date", currentDate.Format("2006-01-02"),
 			"query_time", yesterdayEnd.Format(time.RFC3339))
@@ -161,7 +192,52 @@ func main() {
 			logger.Error("Failed to query Prometheus",
 				"date", currentDate.Format("2006-01-02"),
 				"error", err)
-			totalFailed++
+
+			if isRetentionError(err) {
+				datesWithoutData = append(datesWithoutData, currentDate.Format("2006-01-02"))
+				totalNoData++
+
+				if dryRun {
+					if forceRecompute {
+						if skipIfNoData {
+							fmt.Printf("  [DRY RUN] Would skip: %s (Prometheus has no data, would keep old data)\n", currentDate.Format("2006-01-02"))
+							totalSkipped++
+						} else {
+							fmt.Printf("  [DRY RUN] Would delete: %s (Prometheus has no data, would delete old data)\n", currentDate.Format("2006-01-02"))
+							totalDeleted++
+						}
+					} else {
+						fmt.Printf("  [DRY RUN] Would skip: %s (Prometheus has no data)\n", currentDate.Format("2006-01-02"))
+						totalSkipped++
+					}
+				} else {
+					if forceRecompute {
+						if skipIfNoData {
+							logger.Info("Skipping: Prometheus has no data, keeping old data",
+								"date", currentDate.Format("2006-01-02"))
+							totalSkipped++
+						} else {
+							deletedCount, delErr := db.DeleteMetricsByDate(queryID, currentDate)
+							if delErr != nil {
+								logger.Error("Failed to delete old data", "error", delErr)
+								totalFailed++
+							} else {
+								logger.Info("Deleted old data, no new data available",
+									"date", currentDate.Format("2006-01-02"),
+									"deleted_count", deletedCount)
+								totalDeleted++
+							}
+						}
+					} else {
+						logger.Info("Skipping: Prometheus has no data",
+							"date", currentDate.Format("2006-01-02"))
+						totalSkipped++
+					}
+				}
+			} else {
+				totalFailed++
+			}
+
 			cancel()
 			currentDate = currentDate.AddDate(0, 0, 1)
 			continue
@@ -183,7 +259,7 @@ func main() {
 
 			// Convert vector samples to metric records
 			for _, sample := range vectorResult {
-				record, err := convertSampleToRecord(&sample, queryConfig.ID, yesterdayEnd)
+				record, err := convertSampleToRecord(&sample, queryConfig.ID, yesterdayEnd, queryConfig.TimeRange, timeResolver, currentDate)
 				if err != nil {
 					logger.Warn("Failed to convert sample to record, skipping",
 						"error", err)
@@ -193,36 +269,107 @@ func main() {
 			}
 		}
 
-		// Check if data already exists for this date
-		existingCount, err := checkExistingData(db, queryConfig.ID, currentDate)
-		if err != nil {
-			logger.Warn("Failed to check existing data",
-				"date", currentDate.Format("2006-01-02"),
-				"error", err)
-		}
+		if len(metricRecords) == 0 {
+			datesWithoutData = append(datesWithoutData, currentDate.Format("2006-01-02"))
+			totalNoData++
 
-		if existingCount > 0 {
-			logger.Info("Data already exists, skipping",
-				"date", currentDate.Format("2006-01-02"),
-				"existing_count", existingCount,
-				"new_count", len(metricRecords))
-		} else {
-			// Store metric records
-			if len(metricRecords) > 0 {
-				if err := db.InsertMetricRecords(metricRecords); err != nil {
-					logger.Error("Failed to store metric records",
-						"date", currentDate.Format("2006-01-02"),
-						"error", err)
-					totalFailed++
+			if dryRun {
+				if forceRecompute {
+					if skipIfNoData {
+						fmt.Printf("  [DRY RUN] Would skip: %s (Prometheus returned no data, would keep old data)\n", currentDate.Format("2006-01-02"))
+						totalSkipped++
+					} else {
+						fmt.Printf("  [DRY RUN] Would delete: %s (Prometheus returned no data, would delete old data)\n", currentDate.Format("2006-01-02"))
+						totalDeleted++
+					}
 				} else {
-					logger.Info("Successfully stored metric records",
-						"date", currentDate.Format("2006-01-02"),
-						"count", len(metricRecords))
-					totalProcessed++
+					fmt.Printf("  [DRY RUN] Would skip: %s (Prometheus returned no data)\n", currentDate.Format("2006-01-02"))
+					totalSkipped++
 				}
 			} else {
-				logger.Warn("No data found for date",
-					"date", currentDate.Format("2006-01-02"))
+				if forceRecompute {
+					if skipIfNoData {
+						logger.Info("Skipping: Prometheus returned no data, keeping old data",
+							"date", currentDate.Format("2006-01-02"))
+						totalSkipped++
+					} else {
+						deletedCount, delErr := db.DeleteMetricsByDate(queryID, currentDate)
+						if delErr != nil {
+							logger.Error("Failed to delete old data", "error", delErr)
+							totalFailed++
+						} else {
+							logger.Info("Deleted old data, no new data available",
+								"date", currentDate.Format("2006-01-02"),
+								"deleted_count", deletedCount)
+							totalDeleted++
+						}
+					}
+				} else {
+					logger.Info("Skipping: Prometheus returned no data",
+						"date", currentDate.Format("2006-01-02"))
+					totalSkipped++
+				}
+			}
+		} else {
+			datesWithData = append(datesWithData, currentDate.Format("2006-01-02"))
+
+			// Check if data already exists for this date
+			existingCount, err := checkExistingData(db, queryID, currentDate)
+			if err != nil {
+				logger.Warn("Failed to check existing data",
+					"date", currentDate.Format("2006-01-02"),
+					"error", err)
+			}
+
+			if existingCount > 0 && !forceRecompute {
+				if dryRun {
+					fmt.Printf("  [DRY RUN] Would skip: %s (data already exists: %d records)\n",
+						currentDate.Format("2006-01-02"), existingCount)
+				} else {
+					logger.Info("Data already exists, skipping",
+						"date", currentDate.Format("2006-01-02"),
+						"existing_count", existingCount,
+						"new_count", len(metricRecords))
+				}
+				totalSkipped++
+			} else {
+				if dryRun {
+					if forceRecompute && existingCount > 0 {
+						fmt.Printf("  [DRY RUN] Would delete: %s (%d old records)\n",
+							currentDate.Format("2006-01-02"), existingCount)
+					}
+					fmt.Printf("  [DRY RUN] Would insert: %s (%d new records)\n",
+						currentDate.Format("2006-01-02"), len(metricRecords))
+					totalProcessed++
+				} else {
+					// Delete old data if force recompute
+					if forceRecompute && existingCount > 0 {
+						deletedCount, delErr := db.DeleteMetricsByDate(queryID, currentDate)
+						if delErr != nil {
+							logger.Error("Failed to delete old data", "error", delErr)
+							totalFailed++
+							cancel()
+							currentDate = currentDate.AddDate(0, 0, 1)
+							continue
+						}
+						logger.Info("Deleted old data",
+							"date", currentDate.Format("2006-01-02"),
+							"deleted_count", deletedCount)
+					}
+
+					// Store metric records
+					if err := db.InsertMetricRecords(metricRecords); err != nil {
+						logger.Error("Failed to store metric records",
+							"date", currentDate.Format("2006-01-02"),
+							"error", err)
+						totalFailed++
+					} else {
+						logger.Info("Successfully stored metric records",
+							"date", currentDate.Format("2006-01-02"),
+							"count", len(metricRecords))
+						totalProcessed++
+					}
+				}
 			}
 		}
 
@@ -233,16 +380,87 @@ func main() {
 		time.Sleep(100 * time.Millisecond)
 	}
 
+	// Print summary
+	fmt.Println()
+	fmt.Println("Repair Summary:")
+	fmt.Printf("  Processed: %d days\n", totalProcessed)
+	fmt.Printf("  Skipped: %d days\n", totalSkipped)
+	fmt.Printf("  Failed: %d days\n", totalFailed)
+	if forceRecompute {
+		fmt.Printf("  Deleted (no new data): %d days\n", totalDeleted)
+	}
+	fmt.Printf("  Prometheus has data: %d days\n", len(datesWithData))
+	fmt.Printf("  Prometheus no data: %d days\n", len(datesWithoutData))
+
+	if dryRun {
+		fmt.Println()
+		fmt.Println("⚠️  DRY RUN: No changes were made")
+	} else if len(datesWithoutData) > 0 && forceRecompute && !skipIfNoData {
+		fmt.Println()
+		fmt.Println("⚠️  Warning: Some dates had no data in Prometheus, old data was deleted")
+		fmt.Printf("   Dates without data: %s\n", strings.Join(datesWithoutData[:min(10, len(datesWithoutData))], ", "))
+		if len(datesWithoutData) > 10 {
+			fmt.Printf("   ... and %d more dates\n", len(datesWithoutData)-10)
+		}
+	}
+
 	logger.Info("Data repair completed",
 		"total_processed", totalProcessed,
-		"total_failed", totalFailed)
-	fmt.Printf("\nRepair Summary:\n")
-	fmt.Printf("  Processed: %d days\n", totalProcessed)
-	fmt.Printf("  Failed: %d days\n", totalFailed)
+		"total_skipped", totalSkipped,
+		"total_failed", totalFailed,
+		"total_deleted", totalDeleted)
+}
+
+// loadQueryConfigFromDB loads query configuration from database
+func loadQueryConfigFromDB(db *database.DB, queryID string) (*models.QueryConfig, error) {
+	query := `
+		SELECT query_id, name, description, query, schedule, timeout,
+		       enabled, retry_count, retry_interval,
+		       time_range_type, time_range_time
+		FROM query_configs
+		WHERE query_id = ? AND enabled = 1
+	`
+
+	var config models.QueryConfig
+	var retryInterval string
+	var timeRangeType, timeRangeTime sql.NullString
+
+	err := db.GetConn().QueryRow(query, queryID).Scan(
+		&config.ID,
+		&config.Name,
+		&config.Description,
+		&config.Query,
+		&config.Schedule,
+		&config.Timeout,
+		&config.Enabled,
+		&config.RetryCount,
+		&retryInterval,
+		&timeRangeType,
+		&timeRangeTime,
+	)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("query config not found: %s", queryID)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to query config: %w", err)
+	}
+
+	config.RetryInterval = retryInterval
+
+	if timeRangeType.Valid && timeRangeType.String != "" {
+		config.TimeRange = &models.TimeRangeConfig{
+			Type: timeRangeType.String,
+		}
+		if timeRangeTime.Valid {
+			config.TimeRange.Time = timeRangeTime.String
+		}
+	}
+
+	return &config, nil
 }
 
 // convertSampleToRecord converts a VectorSample to MetricRecord
-func convertSampleToRecord(sample *models.VectorSample, queryID string, queryTime time.Time) (*models.MetricRecord, error) {
+func convertSampleToRecord(sample *models.VectorSample, queryID string, queryTime time.Time, timeRange *models.TimeRangeConfig, timeResolver timeparser.TimeResolver, currentDate time.Time) (*models.MetricRecord, error) {
 	// Extract metric name
 	metricName := sample.Metric["__name__"]
 	if metricName == "" {
@@ -278,15 +496,61 @@ func convertSampleToRecord(sample *models.VectorSample, queryID string, queryTim
 		}
 	}
 
+	// Determine result type
+	resultType := "instant"
+	if timeRange != nil && timeRange.Type == "range" {
+		resultType = "range"
+	}
+
+	// Calculate collected_at based on query configuration
+	dataPointTime := time.Unix(int64(timestamp), 0)
+	collectedAt := calculateCollectedAt(dataPointTime, timeRange, timeResolver, currentDate)
+
 	return &models.MetricRecord{
 		QueryID:     queryID,
 		MetricName:  metricName,
 		Labels:      labels,
 		Value:       value,
-		Timestamp:   time.Unix(int64(timestamp), 0),
-		ResultType:  "instant",
-		CollectedAt: time.Unix(int64(timestamp), 0), // Use Prometheus timestamp as collected_at for proper date grouping
+		Timestamp:   dataPointTime,
+		ResultType:  resultType,
+		CollectedAt: collectedAt,
 	}, nil
+}
+
+// calculateCollectedAt calculates the collected_at timestamp based on query configuration
+// For historical data repair, currentDate should be the target date being processed,
+// not the current system time. This ensures "yesterday_end" resolves correctly.
+func calculateCollectedAt(dataPointTime time.Time, timeRange *models.TimeRangeConfig, timeResolver timeparser.TimeResolver, currentDate time.Time) time.Time {
+	if timeRange == nil {
+		// No time range config, use data point's day start
+		dataDate := time.Date(dataPointTime.Year(), dataPointTime.Month(), dataPointTime.Day(), 0, 0, 0, 0, dataPointTime.Location())
+		return dataDate
+	}
+
+	// Update time resolver to use currentDate + 1 day as "now" for historical data repair
+	// This ensures that "yesterday_end" resolves to currentDate, not the actual yesterday
+	if relativeParser, ok := timeResolver.(*timeparser.RelativeTimeParser); ok {
+		relativeParser.UpdateNow(currentDate.Add(24 * time.Hour))
+	}
+
+	if timeRange.Type == "instant" {
+		// For instant queries, check if querying yesterday's data
+		if timeRange.Time == "yesterday" || timeRange.Time == "yesterday_end" {
+			queryTime, err := timeResolver.ResolveTime(timeRange.Time)
+			if err == nil {
+				// Use yesterday's start time (which should be currentDate for historical repair)
+				yesterdayStart := time.Date(queryTime.Year(), queryTime.Month(), queryTime.Day(), 0, 0, 0, 0, queryTime.Location())
+				return yesterdayStart
+			}
+		}
+		// For other instant queries, use the data point's day start
+		dataDate := time.Date(dataPointTime.Year(), dataPointTime.Month(), dataPointTime.Day(), 0, 0, 0, 0, dataPointTime.Location())
+		return dataDate
+	}
+
+	// Default: use data point's day start
+	dataDate := time.Date(dataPointTime.Year(), dataPointTime.Month(), dataPointTime.Day(), 0, 0, 0, 0, dataPointTime.Location())
+	return dataDate
 }
 
 // checkExistingData checks if data already exists for a specific date
@@ -311,6 +575,18 @@ func checkExistingData(db *database.DB, queryID string, date time.Time) (int64, 
 	return count, nil
 }
 
+// isRetentionError checks if error is due to data retention
+// Note: This function uses string matching against error messages, which is fragile.
+// The Prometheus client library doesn't provide typed errors for retention issues.
+// Expected error patterns: "out of bounds", "too old", "retention".
+// If Prometheus client library changes error messages in future versions, this logic may need updates.
+func isRetentionError(err error) bool {
+	errMsg := err.Error()
+	return strings.Contains(errMsg, "out of bounds") ||
+		strings.Contains(errMsg, "too old") ||
+		strings.Contains(errMsg, "retention")
+}
+
 // loadEnvFile loads environment variables from a .env file
 func loadEnvFile(filename string) {
 	file, err := os.Open(filename)
@@ -323,7 +599,7 @@ func loadEnvFile(filename string) {
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		
+
 		// Skip empty lines and comments
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -352,4 +628,3 @@ func loadEnvFile(filename string) {
 		}
 	}
 }
-

@@ -30,6 +30,12 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -o prom-etl-db \
     ./cmd/server
 
+# Build repair tool
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags "-X main.version=${VERSION} -X main.buildTime=${BUILD_TIME} -X main.goVersion=${GO_VERSION}" \
+    -o repair \
+    ./cmd/repair
+
 # Runtime stage
 FROM alpine:latest
 
@@ -43,8 +49,9 @@ RUN addgroup -g 1001 appuser && \
 # Set working directory
 WORKDIR /app
 
-# Copy binary from build stage
+# Copy binaries from build stage
 COPY --from=builder /app/prom-etl-db .
+COPY --from=builder /app/repair .
 
 # Create logs directory
 RUN mkdir -p logs && chown -R appuser:appuser /app
