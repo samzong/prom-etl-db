@@ -16,9 +16,9 @@ import (
 
 // Executor handles query execution and data storage
 type Executor struct {
-	promClient  *prometheus.Client
-	db          *database.DB
-	logger      *slog.Logger
+	promClient   *prometheus.Client
+	db           *database.DB
+	logger       *slog.Logger
 	timeResolver timeparser.TimeResolver
 }
 
@@ -424,7 +424,7 @@ func (e *Executor) calculateCollectedAt(dataPointTime time.Time, timeRange *mode
 				// Check if start and end are on the same day
 				startDate := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, start.Location())
 				endDate := time.Date(end.Year(), end.Month(), end.Day(), 0, 0, 0, 0, end.Location())
-				
+
 				if startDate.Equal(endDate) {
 					// Same day: use the start of that day for all data points
 					return startDate

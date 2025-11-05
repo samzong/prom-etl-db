@@ -288,6 +288,31 @@ func (db *DB) CleanupOldMetrics(olderThan time.Time) (int64, error) {
 	return rowsAffected, nil
 }
 
+// DeleteMetricsByDate deletes metrics for a specific query and date
+func (db *DB) DeleteMetricsByDate(queryID string, date time.Time) (int64, error) {
+	startOfDay := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
+	endOfDay := startOfDay.Add(24 * time.Hour)
+
+	query := `
+		DELETE FROM metrics_data 
+		WHERE query_id = ? 
+		AND collected_at >= ? 
+		AND collected_at < ?
+	`
+
+	result, err := db.conn.Exec(query, queryID, startOfDay, endOfDay)
+	if err != nil {
+		return 0, fmt.Errorf("failed to delete metrics: %w", err)
+	}
+
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("failed to get rows affected: %w", err)
+	}
+
+	return rowsAffected, nil
+}
+
 // GetDatabaseStats returns database statistics
 func (db *DB) GetDatabaseStats() (map[string]interface{}, error) {
 	stats := make(map[string]interface{})
