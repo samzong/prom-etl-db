@@ -7,9 +7,6 @@ ARG VERSION=dev
 ARG BUILD_TIME
 ARG GO_VERSION
 
-# Install git (needed for go modules)
-RUN apk add --no-cache git
-
 # Set working directory
 WORKDIR /app
 

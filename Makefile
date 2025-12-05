@@ -12,7 +12,7 @@ MAIN_PATH := ./cmd/server
 BUILD_DIR := ./build
 DOCKER_REGISTRY := release.daocloud.io/ndx-product
 DOCKER_IMAGE := $(DOCKER_REGISTRY)/prom-etl-db
-DOCKER_TAG ?= $(shell echo $${DOCKER_TAG:-v0.1.2})
+DOCKER_TAG ?= $(VERSION)
 
 # Go Build Flags
 LDFLAGS := -ldflags "-X main.version=$(VERSION) -X main.buildTime=$(BUILD_TIME) -X main.goVersion=$(GO_VERSION)"
